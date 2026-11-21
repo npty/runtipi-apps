@@ -1,0 +1,28 @@
+{
+  "$schema": "../app-info-schema.json",
+  "name": "Immich Screenshot Filer",
+  "id": "immich-screenshot-filer",
+  "available": true,
+  "port": 8936,
+  "exposable": false,
+  "dynamic_config": true,
+  "no_gui": true,
+  "tipi_version": 1,
+  "version": "1.0.0",
+  "categories": ["photography", "utilities"],
+  "short_desc": "Files new iPhone and Mac screenshots in Immich into an album and archives them.",
+  "description": "Checks new Immich uploads (Bun + TypeScript) every minute for Apple's screenshot marker (EXIF UserComment 'Screenshot', kept when cropped), adds matches to an album and archives them.",
+  "author": "npty",
+  "source": "https://github.com/npty",
+  "supported_architectures": ["arm64", "amd64"],
+  "form_fields": [
+    {"type": "url", "label": "Immich URL", "required": true, "default": "https://immich.npty.online", "env_variable": "FILER_IMMICH_URL"},
+    {"type": "password", "label": "Immich API key (asset.read, asset.download, asset.update, album.read, albumAsset.create)", "required": true, "env_variable": "FILER_IMMICH_API_KEY"},
+    {"type": "text", "label": "Album ID", "required": true, "default": "06a445a4-bfa3-46cd-bf05-6c22353f79af", "env_variable": "FILER_ALBUM_ID"},
+    {"type": "number", "label": "Check every (seconds)", "required": false, "default": 60, "env_variable": "FILER_INTERVAL"},
+    {"type": "boolean", "label": "Dry run (log only, change nothing)", "required": false, "default": false, "env_variable": "FILER_DRY_RUN"}
+  ],
+  "created_at": 1795273202073,
+  "updated_at": 1795273202073,
+  "min_tipi_version": "4.5.0"
+}

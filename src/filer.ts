@@ -1,0 +1,140 @@
+// Immich screenshot filer (Bun + TypeScript, no dependencies).
+//
+// Every INTERVAL seconds, finds recently changed images on the Immich timeline,
+// checks each one for Apple's screenshot marker (EXIF UserComment "Screenshot",
+// written by iOS and macOS and kept when a screenshot is cropped), then adds
+// the matches to an album and archives them.
+
+type Exif = { make?: string | null; model?: string | null; exifImageWidth?: number | null };
+type Asset = { id: string; originalFileName: string; updatedAt?: string; exifInfo?: Exif };
+
+const env = (k: string, d?: string): string => {
+  const v = process.env[k];
+  if (v !== undefined && v !== "") return v;
+  if (d !== undefined) return d;
+  throw new Error("missing env " + k);
+};
+const flag = (k: string, d: string) => ["1", "true", "yes"].includes(env(k, d).toLowerCase());
+
+let URL_ = env("IMMICH_URL");
+while (URL_.endsWith("/")) URL_ = URL_.slice(0, -1);
+const KEY = env("IMMICH_API_KEY");
+const ALBUM_ID = env("ALBUM_ID");
+const INTERVAL = Number(env("INTERVAL", "60"));
+const LOOKBACK_MIN = Number(env("LOOKBACK_MINUTES", "30"));
+const BACKFILL = flag("BACKFILL", "true");
+const DRY_RUN = flag("DRY_RUN", "false");
+const HEAD_BYTES = 256 * 1024;
+
+// Exact bytes of an EXIF UserComment set to "Screenshot" (ASCII charset header).
+const MARKER = new TextEncoder().encode("ASCII\0\0\0Screenshot");
+// Makes Apple writes on screenshots; real camera photos have a model set.
+const SCREENSHOT_MAKES = new Set<string | null | undefined>([null, undefined, "", "Apple Computer Inc."]);
+
+const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function api(method: string, path: string, body?: unknown, headers: Record<string, string> = {}) {
+  const res = await fetch(URL_ + "/api" + path, {
+    method,
+    headers: {
+      "x-api-key": KEY,
+      Accept: "application/json",
+      ...(body !== undefined ? { "Content-Type": "application/json" } : {}),
+      ...headers,
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(60_000),
+  });
+  if (!res.ok) throw new Error(method + " " + path + " -> " + res.status + " " + ((await res.text()).slice(0, 200)));
+  return res;
+}
+
+async function* candidates(updatedAfter?: string): AsyncGenerator<Asset> {
+  let page: number | null = 1;
+  while (page) {
+    const body: Record<string, unknown> = {
+      type: "IMAGE", visibility: "timeline", withExif: true, size: 500, page, order: "desc",
+    };
+    if (updatedAfter) body.updatedAfter = updatedAfter;
+    const { assets } = (await (await api("POST", "/search/metadata", body)).json()) as {
+      assets: { items: Asset[]; nextPage: string | null };
+    };
+    for (const a of assets.items) {
+      const e = a.exifInfo ?? {};
+      if (e.model || !SCREENSHOT_MAKES.has(e.make)) continue;
+      if (!e.exifImageWidth) continue; // metadata not extracted yet; picked up on a later pass
+      yield a;
+    }
+    page = assets.nextPage ? Number(assets.nextPage) : null;
+  }
+}
+
+function includes(hay: Uint8Array, needle: Uint8Array): boolean {
+  outer: for (let i = hay.indexOf(needle[0]); i !== -1 && i <= hay.length - needle.length; i = hay.indexOf(needle[0], i + 1)) {
+    for (let j = 1; j < needle.length; j++) if (hay[i + j] !== needle[j]) continue outer;
+    return true;
+  }
+  return false;
+}
+
+async function isScreenshot(id: string): Promise<boolean> {
+  const res = await api("GET", "/assets/" + id + "/original", undefined, {
+    Range: "bytes=0-" + (HEAD_BYTES - 1),
+    Accept: "*/*",
+  });
+  const head = new Uint8Array(await res.arrayBuffer()).subarray(0, HEAD_BYTES);
+  return includes(head, MARKER);
+}
+
+async function fileAssets(ids: string[]) {
+  if (DRY_RUN) return log("DRY RUN: would file " + ids.length + ": " + ids.join(","));
+  await api("PUT", "/albums/" + ALBUM_ID + "/assets", { ids });
+  await api("PUT", "/assets", { ids, visibility: "archive" });
+  log("filed " + ids.length + " screenshot(s)");
+}
+
+async function scan(updatedAfter: string | undefined, checked: Set<string>): Promise<number> {
+  const hits: string[] = [];
+  for await (const a of candidates(updatedAfter)) {
+    const key = a.id + "|" + a.updatedAt;
+    if (checked.has(key)) continue;
+    try {
+      if (await isScreenshot(a.id)) {
+        hits.push(a.id);
+        log("screenshot:", a.originalFileName);
+      }
+    } catch (err) {
+      log("skip", a.originalFileName, String(err));
+      continue;
+    }
+    checked.add(key);
+  }
+  for (let i = 0; i < hits.length; i += 200) await fileAssets(hits.slice(i, i + 200));
+  return hits.length;
+}
+
+async function main() {
+  await api("GET", "/albums/" + ALBUM_ID + "?withoutAssets=true"); // fail fast on bad URL/key/album
+  log("started: album " + ALBUM_ID + ", every " + INTERVAL + "s, dry_run=" + DRY_RUN);
+  const checked = new Set<string>();
+  if (BACKFILL) {
+    log("backfill: checking the whole timeline once");
+    log("backfill done: " + (await scan(undefined, checked)) + " filed");
+  }
+  while (true) {
+    const since = new Date(Date.now() - LOOKBACK_MIN * 60_000).toISOString();
+    try {
+      await scan(since, checked);
+    } catch (err) {
+      log("error:", String(err)); // keep running through Immich restarts/outages
+    }
+    if (checked.size > 50_000) checked.clear();
+    await sleep(INTERVAL * 1000);
+  }
+}
+
+main().catch((err) => {
+  log("fatal:", String(err));
+  process.exit(1);
+});
