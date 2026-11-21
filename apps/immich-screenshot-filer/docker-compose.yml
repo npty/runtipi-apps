@@ -8,6 +8,8 @@ services:
       - ALBUM_ID=${FILER_ALBUM_ID}
       - INTERVAL=${FILER_INTERVAL:-60}
       - DRY_RUN=${FILER_DRY_RUN:-false}
+      - SLIPS_MODE=${FILER_SLIPS_MODE:-off}
+      - SLIPS_ALBUM_ID=${FILER_SLIPS_ALBUM_ID:-e4feb9fc-17ee-40e5-9766-fa80d83fa623}
       - BACKFILL=true
       - TZ=${TZ}
     # Source: src/filer.ts in this repo, inlined so the app needs no image build.
@@ -15,15 +17,23 @@ services:
       - bun
       - -e
       - |
-        // Immich screenshot filer (Bun + TypeScript, no dependencies).
+        // Immich filer (Bun + TypeScript, no dependencies).
         //
-        // Every INTERVAL seconds, finds recently changed images on the Immich timeline,
-        // checks each one for Apple's screenshot marker (EXIF UserComment "Screenshot",
-        // written by iOS and macOS and kept when a screenshot is cropped), then adds
-        // the matches to an album and archives them.
+        // Every INTERVAL seconds, finds recently changed images on the Immich timeline
+        // that have no camera model, sorts each into the first rule that matches,
+        // adds it to that rule's album and archives it.
+        //
+        // Rules, in order:
+        //   screenshots  Apple's EXIF UserComment "Screenshot" (iPhone/iPad/Mac, kept when cropped)
+        //   slips        bank/payment slips: bank-app filename, or slip wording in Immich's OCR text
+        //
+        // Each rule has a mode: "on" (file), "dry" (log only) or "off".
+        // NOTE: this file is inlined into docker-compose.yml, so it must not contain the dollar sign.
 
         type Exif = { make?: string | null; model?: string | null; exifImageWidth?: number | null };
-        type Asset = { id: string; originalFileName: string; updatedAt?: string; exifInfo?: Exif };
+        type Asset = { id: string; originalFileName: string; createdAt?: string; updatedAt?: string; exifInfo?: Exif };
+        type Mode = "on" | "dry" | "off";
+        type Verdict = { rule: string } | "none" | "wait";
 
         const env = (k: string, d?: string): string => {
           const v = process.env[k];
@@ -31,22 +41,52 @@ services:
           if (d !== undefined) return d;
           throw new Error("missing env " + k);
         };
-        const flag = (k: string, d: string) => ["1", "true", "yes"].includes(env(k, d).toLowerCase());
+        const isTrue = (v: string) => ["1", "true", "yes"].includes(v.toLowerCase());
+        const mode = (k: string, d: Mode): Mode => {
+          const v = env(k, d).toLowerCase();
+          return v === "on" || v === "dry" || v === "off" ? v : d;
+        };
 
         let URL_ = env("IMMICH_URL");
         while (URL_.endsWith("/")) URL_ = URL_.slice(0, -1);
         const KEY = env("IMMICH_API_KEY");
-        const ALBUM_ID = env("ALBUM_ID");
         const INTERVAL = Number(env("INTERVAL", "60"));
         const LOOKBACK_MIN = Number(env("LOOKBACK_MINUTES", "30"));
-        const BACKFILL = flag("BACKFILL", "true");
-        const DRY_RUN = flag("DRY_RUN", "false");
+        const OCR_WAIT_HOURS = Number(env("OCR_WAIT_HOURS", "6"));
+        const BACKFILL = isTrue(env("BACKFILL", "true"));
         const HEAD_BYTES = 256 * 1024;
+
+        // Back-compat: DRY_RUN=true used to switch the screenshot rule to log-only.
+        const RULES: Record<string, { mode: Mode; album: string }> = {
+          screenshots: {
+            mode: mode("SCREENSHOTS_MODE", isTrue(env("DRY_RUN", "false")) ? "dry" : "on"),
+            album: env("SCREENSHOTS_ALBUM_ID", env("ALBUM_ID", "")),
+          },
+          slips: {
+            mode: mode("SLIPS_MODE", "off"),
+            album: env("SLIPS_ALBUM_ID", ""),
+          },
+        };
 
         // Exact bytes of an EXIF UserComment set to "Screenshot" (ASCII charset header).
         const MARKER = new TextEncoder().encode("ASCII\0\0\0Screenshot");
-        // Makes Apple writes on screenshots; real camera photos have a model set.
-        const SCREENSHOT_MAKES = new Set<string | null | undefined>([null, undefined, "", "Apple Computer Inc."]);
+        // Makes seen on screenshots and app-saved images; real camera photos have a model set.
+        const NO_CAMERA_MAKES = new Set<string | null | undefined>([null, undefined, "", "Apple Computer Inc."]);
+
+        // Bank and broker apps that save slips with their own file names (Krungthai, Dime FX, ...).
+        const SLIP_FILENAME = /^(STKB|TSKB|TSKS|STKS|FX\d)/i;
+        // Wording found on transfer/payment slips (English and Thai).
+        const SLIP_TEXT = new RegExp(
+          [
+            "scan (this|the) QR code to verify",
+            "successful(ly)? (transfer|payment|paid|top ?up|bill)",
+            "(transfer|payment) successful",
+            "โอนเงินสำเร็จ", "ชำระเงินสำเร็จ", "เติมเงินสำเร็จ", "จ่ายบิลสำเร็จ",
+            "รหัสอ้างอิง", "เลขที่รายการ", "ค่าธรรมเนียม",
+            "Transaction (ID|Details|No|Ref)", "Ref(erence)? ?(No|ID|Code|number)", "e-?Receipt", "e-?slip",
+          ].join("|"),
+          "i",
+        );
 
         const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
         const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -63,7 +103,7 @@ services:
             body: body !== undefined ? JSON.stringify(body) : undefined,
             signal: AbortSignal.timeout(60_000),
           });
-          if (!res.ok) throw new Error(method + " " + path + " -> " + res.status + " " + ((await res.text()).slice(0, 200)));
+          if (!res.ok) throw new Error(method + " " + path + " -> " + res.status + " " + (await res.text()).slice(0, 200));
           return res;
         }
 
@@ -79,7 +119,7 @@ services:
             };
             for (const a of assets.items) {
               const e = a.exifInfo ?? {};
-              if (e.model || !SCREENSHOT_MAKES.has(e.make)) continue;
+              if (e.model || !NO_CAMERA_MAKES.has(e.make)) continue;
               if (!e.exifImageWidth) continue; // metadata not extracted yet; picked up on a later pass
               yield a;
             }
@@ -95,54 +135,101 @@ services:
           return false;
         }
 
-        async function isScreenshot(id: string): Promise<boolean> {
+        async function hasScreenshotMarker(id: string): Promise<boolean> {
           const res = await api("GET", "/assets/" + id + "/original", undefined, {
             Range: "bytes=0-" + (HEAD_BYTES - 1),
             Accept: "*/*",
           });
-          const head = new Uint8Array(await res.arrayBuffer()).subarray(0, HEAD_BYTES);
-          return includes(head, MARKER);
+          return includes(new Uint8Array(await res.arrayBuffer()).subarray(0, HEAD_BYTES), MARKER);
         }
 
-        async function fileAssets(ids: string[]) {
-          if (DRY_RUN) return log("DRY RUN: would file " + ids.length + ": " + ids.join(","));
-          await api("PUT", "/albums/" + ALBUM_ID + "/assets", { ids });
+        async function ocrText(id: string): Promise<string> {
+          const boxes = (await (await api("GET", "/assets/" + id + "/ocr")).json()) as { text: string }[];
+          return boxes.map((b) => b.text).join(" ").replace(/\s+/g, " ");
+        }
+
+        async function classify(a: Asset): Promise<Verdict> {
+          if (RULES.screenshots.mode !== "off" && (await hasScreenshotMarker(a.id))) return { rule: "screenshots" };
+          if (RULES.slips.mode !== "off") {
+            if (SLIP_FILENAME.test(a.originalFileName)) return { rule: "slips" };
+            const text = await ocrText(a.id);
+            if (SLIP_TEXT.test(text)) return { rule: "slips" };
+            // OCR runs in the background after upload; give it time before deciding.
+            const ageH = (Date.now() - Date.parse(a.createdAt ?? "")) / 3_600_000;
+            if (!text && ageH < OCR_WAIT_HOURS) return "wait";
+          }
+          return "none";
+        }
+
+        async function fileAssets(rule: string, ids: string[]) {
+          const r = RULES[rule];
+          if (r.mode === "dry") return log("DRY RUN " + rule + ": would file " + ids.length);
+          await api("PUT", "/albums/" + r.album + "/assets", { ids });
           await api("PUT", "/assets", { ids, visibility: "archive" });
-          log("filed " + ids.length + " screenshot(s)");
+          log(rule + ": filed " + ids.length);
         }
 
-        async function scan(updatedAfter: string | undefined, checked: Set<string>): Promise<number> {
-          const hits: string[] = [];
-          for await (const a of candidates(updatedAfter)) {
+        async function process_(list: Asset[], checked: Set<string>, pending: Map<string, Asset>) {
+          const hits: Record<string, string[]> = {};
+          for (const a of list) {
             const key = a.id + "|" + a.updatedAt;
             if (checked.has(key)) continue;
+            let v: Verdict;
             try {
-              if (await isScreenshot(a.id)) {
-                hits.push(a.id);
-                log("screenshot:", a.originalFileName);
-              }
+              v = await classify(a);
             } catch (err) {
               log("skip", a.originalFileName, String(err));
               continue;
             }
+            if (v === "wait") {
+              pending.set(a.id, a);
+              continue;
+            }
+            pending.delete(a.id);
             checked.add(key);
+            if (v !== "none") {
+              (hits[v.rule] ??= []).push(a.id);
+              log(v.rule + ":", a.originalFileName);
+            }
           }
-          for (let i = 0; i < hits.length; i += 200) await fileAssets(hits.slice(i, i + 200));
-          return hits.length;
+          for (const [rule, ids] of Object.entries(hits))
+            for (let i = 0; i < ids.length; i += 200) await fileAssets(rule, ids.slice(i, i + 200));
+          return Object.values(hits).reduce((n, ids) => n + ids.length, 0);
+        }
+
+        async function scan(updatedAfter: string | undefined, checked: Set<string>, pending: Map<string, Asset>) {
+          const batch: Asset[] = [];
+          const seen = new Set<string>();
+          let n = 0;
+          for await (const a of candidates(updatedAfter)) {
+            batch.push(a);
+            seen.add(a.id);
+            if (batch.length >= 200) n += await process_(batch.splice(0), checked, pending);
+          }
+          n += await process_(batch, checked, pending);
+          // Recheck assets still waiting for OCR, even after they fall out of the lookback window.
+          const waiting = [...pending.values()].filter((a) => !seen.has(a.id));
+          if (waiting.length) n += await process_(waiting, checked, pending);
+          return n;
         }
 
         async function main() {
-          await api("GET", "/albums/" + ALBUM_ID + "?withoutAssets=true"); // fail fast on bad URL/key/album
-          log("started: album " + ALBUM_ID + ", every " + INTERVAL + "s, dry_run=" + DRY_RUN);
+          for (const [name, r] of Object.entries(RULES)) {
+            if (r.mode === "off") continue;
+            if (!r.album) throw new Error(name + ": album ID is required when the rule is on or dry");
+            await api("GET", "/albums/" + r.album + "?withoutAssets=true"); // fail fast on bad URL/key/album
+          }
+          log("started: " + Object.entries(RULES).map(([n, r]) => n + "=" + r.mode).join(", ") + ", every " + INTERVAL + "s");
           const checked = new Set<string>();
+          const pending = new Map<string, Asset>();
           if (BACKFILL) {
             log("backfill: checking the whole timeline once");
-            log("backfill done: " + (await scan(undefined, checked)) + " filed");
+            log("backfill done: " + (await scan(undefined, checked, pending)) + " matched");
           }
           while (true) {
             const since = new Date(Date.now() - LOOKBACK_MIN * 60_000).toISOString();
             try {
-              await scan(since, checked);
+              await scan(since, checked, pending);
             } catch (err) {
               log("error:", String(err)); // keep running through Immich restarts/outages
             }

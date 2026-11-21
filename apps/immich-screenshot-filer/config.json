@@ -7,22 +7,85 @@
   "exposable": false,
   "dynamic_config": true,
   "no_gui": true,
-  "tipi_version": 1,
-  "version": "1.0.0",
-  "categories": ["photography", "utilities"],
-  "short_desc": "Files new iPhone and Mac screenshots in Immich into an album and archives them.",
-  "description": "Checks new Immich uploads (Bun + TypeScript) every minute for Apple's screenshot marker (EXIF UserComment 'Screenshot', kept when cropped), adds matches to an album and archives them.",
+  "tipi_version": 2,
+  "version": "1.1.0",
+  "categories": [
+    "photography",
+    "utilities"
+  ],
+  "short_desc": "Files screenshots and bank/payment slips in Immich into albums and archives them.",
+  "description": "Checks new Immich uploads every minute. Screenshots (Apple's EXIF 'Screenshot' marker, kept when cropped) go to one album; bank and payment slips (bank-app file names or slip wording in Immich's OCR text) go to another. Matches are archived.",
   "author": "npty",
   "source": "https://github.com/npty",
-  "supported_architectures": ["arm64", "amd64"],
+  "supported_architectures": [
+    "arm64",
+    "amd64"
+  ],
   "form_fields": [
-    {"type": "url", "label": "Immich URL", "required": true, "default": "https://immich.npty.online", "env_variable": "FILER_IMMICH_URL"},
-    {"type": "password", "label": "Immich API key (asset.read, asset.download, asset.update, album.read, albumAsset.create)", "required": true, "env_variable": "FILER_IMMICH_API_KEY"},
-    {"type": "text", "label": "Album ID", "required": true, "default": "06a445a4-bfa3-46cd-bf05-6c22353f79af", "env_variable": "FILER_ALBUM_ID"},
-    {"type": "number", "label": "Check every (seconds)", "required": false, "default": 60, "env_variable": "FILER_INTERVAL"},
-    {"type": "boolean", "label": "Dry run (log only, change nothing)", "required": false, "default": false, "env_variable": "FILER_DRY_RUN"}
+    {
+      "type": "url",
+      "label": "Immich URL",
+      "required": true,
+      "default": "https://immich.npty.online",
+      "env_variable": "FILER_IMMICH_URL"
+    },
+    {
+      "type": "password",
+      "label": "Immich API key (asset.read, asset.download, asset.update, album.read, albumAsset.create)",
+      "required": true,
+      "env_variable": "FILER_IMMICH_API_KEY"
+    },
+    {
+      "type": "text",
+      "label": "Album ID",
+      "required": true,
+      "default": "06a445a4-bfa3-46cd-bf05-6c22353f79af",
+      "env_variable": "FILER_ALBUM_ID"
+    },
+    {
+      "type": "number",
+      "label": "Check every (seconds)",
+      "required": false,
+      "default": 60,
+      "env_variable": "FILER_INTERVAL"
+    },
+    {
+      "type": "boolean",
+      "label": "Screenshots: dry run (log only, change nothing)",
+      "required": false,
+      "default": false,
+      "env_variable": "FILER_DRY_RUN"
+    },
+    {
+      "type": "text",
+      "label": "Bank/payment slips rule",
+      "required": false,
+      "default": "dry",
+      "options": [
+        {
+          "label": "Off",
+          "value": "off"
+        },
+        {
+          "label": "Dry run (log only)",
+          "value": "dry"
+        },
+        {
+          "label": "On (file and archive)",
+          "value": "on"
+        }
+      ],
+      "env_variable": "FILER_SLIPS_MODE"
+    },
+    {
+      "type": "text",
+      "label": "Slips album ID",
+      "required": false,
+      "default": "e4feb9fc-17ee-40e5-9766-fa80d83fa623",
+      "env_variable": "FILER_SLIPS_ALBUM_ID"
+    }
   ],
   "created_at": 1795273202073,
-  "updated_at": 1795273202073,
+  "updated_at": 1795275279253,
   "min_tipi_version": "4.5.0"
 }

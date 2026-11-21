@@ -1,10 +1,9 @@
 # Immich Screenshot Filer
 
-Every minute, checks images that were added or changed in Immich for Apple's screenshot marker
-(the EXIF UserComment "Screenshot" that iPhone, iPad and Mac write, which stays when a screenshot is cropped).
-Matches are added to the chosen album and archived, so they leave the main timeline.
+Every minute, checks images that were added or changed in Immich and have no camera model.
 
-On first start it also checks the whole timeline once.
+- **Screenshots**: Apple's screenshot marker (the EXIF UserComment "Screenshot" that iPhone, iPad and Mac write, kept when cropped) -> screenshots album.
+- **Bank/payment slips** (optional): bank-app file names (STKB…, TSKB…, FX…) or slip wording in Immich's OCR text ("scan this QR code to verify", "โอนเงินสำเร็จ", "รหัสอ้างอิง", …) -> slips album.
 
-Images without the marker (photos, bank slips saved by apps, downloaded images) are never touched.
-Set **Dry run** to see in the logs what it would do without changing anything.
+Matches are added to the album and archived, so they leave the main timeline. On start it checks the whole timeline once.
+Each rule can run as a dry run first: it logs what it would do without changing anything.
