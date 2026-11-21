@@ -1,0 +1,29 @@
+{
+  "$schema": "../app-info-schema.json",
+  "name": "Immich Trips & Digest",
+  "id": "immich-trip-digest",
+  "available": true,
+  "port": 8937,
+  "exposable": false,
+  "dynamic_config": true,
+  "tipi_version": 1,
+  "version": "1.0.0",
+  "categories": ["photography", "utilities"],
+  "short_desc": "Suggests trip albums for unsorted Immich photos and sends a monthly library digest.",
+  "description": "Groups photos that are in no album and were taken away from home into trips and suggests a 'YYYY-MM Place' album for each, which you approve on a small page. Once a month it sums up new unsorted photos, new duplicates, new unnamed faces, storage growth and whether a newer Immich is out. Both are announced in Immich's notification bell.",
+  "author": "npty",
+  "source": "https://github.com/npty",
+  "supported_architectures": ["arm64", "amd64"],
+  "form_fields": [
+    {"type": "url", "label": "Immich URL", "required": true, "default": "https://immich.npty.online", "env_variable": "TRIPS_IMMICH_URL"},
+    {"type": "password", "label": "Immich API key (asset.read, asset.view, album.read, album.create, albumAsset.create, duplicate.read, person.read, person.statistics, server.storage, user.read, notification.create)", "required": true, "env_variable": "TRIPS_IMMICH_API_KEY"},
+    {"type": "text", "label": "Home places, not trips ('Region, Country' separated by ';')", "required": false, "default": "Bangkok, Thailand; Nonthaburi, Thailand; Samut Prakan, Thailand; Abu Dhabi, United Arab Emirates", "env_variable": "TRIPS_HOME_PLACES"},
+    {"type": "number", "label": "Minimum photos with location for a trip", "required": false, "default": 20, "env_variable": "TRIPS_MIN_PHOTOS"},
+    {"type": "number", "label": "Digest day of month", "required": false, "default": 1, "env_variable": "TRIPS_DIGEST_DAY"},
+    {"type": "text", "label": "Address of this page, shown in notifications (e.g. http://192.168.1.10:8937)", "required": false, "env_variable": "TRIPS_PAGE_URL"},
+    {"type": "boolean", "label": "Dry run (write nothing to Immich)", "required": false, "default": false, "env_variable": "TRIPS_DRY_RUN"}
+  ],
+  "created_at": 1795275600000,
+  "updated_at": 1795275600000,
+  "min_tipi_version": "4.5.0"
+}
