@@ -8,12 +8,12 @@
   "dynamic_config": true,
   "no_gui": true,
   "tipi_version": 1,
-  "version": "1.0.0",
+  "version": "1.1.0",
   "categories": [
     "utilities"
   ],
-  "short_desc": "Removes passwords from encrypted PDFs in Nextcloud folders and replaces them in place.",
-  "description": "Scans watched Nextcloud folders over WebDAV, unlocks password-protected PDFs with Stirling-PDF and writes them back under the same name. Conditional write-back (If-Match), output sanity checks, dry run first.",
+  "short_desc": "Unlocks encrypted PDFs in Nextcloud folders in place and names ADCB card statements by card.",
+  "description": "Scans watched Nextcloud folders over WebDAV, unlocks password-protected PDFs with Stirling-PDF and writes them back under the same name. Conditional write-back (If-Match), output sanity checks, dry run first. Also renames ADCB card statements saved without the card number to \"YYYY-MM - ADCB <last4> - Card Statement.pdf\".",
   "author": "npty",
   "source": "https://github.com/npty",
   "supported_architectures": [
@@ -89,6 +89,27 @@
       "env_variable": "UNLOCKER_MODE"
     },
     {
+      "type": "text",
+      "label": "Rename ADCB card statements to include the card number",
+      "required": false,
+      "default": "dry",
+      "options": [
+        {
+          "label": "Off",
+          "value": "off"
+        },
+        {
+          "label": "Dry run (log the new name, change nothing)",
+          "value": "dry"
+        },
+        {
+          "label": "On (rename files)",
+          "value": "on"
+        }
+      ],
+      "env_variable": "UNLOCKER_RENAME_MODE"
+    },
+    {
       "type": "number",
       "label": "Check every (seconds)",
       "required": false,
@@ -97,6 +118,6 @@
     }
   ],
   "created_at": 1795300000000,
-  "updated_at": 1795300000000,
+  "updated_at": 1795340000000,
   "min_tipi_version": "4.5.0"
 }

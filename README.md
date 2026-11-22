@@ -9,4 +9,5 @@
 - `pdf-unlocker`: unlocks password-protected PDFs in watched Nextcloud folders (WebDAV + Stirling-PDF) and
   replaces them in place under the same name. Source is `src/pdf-unlocker.ts`; after editing it run
   `bun scripts/inline-pdf-unlocker.ts`. Tests: `bun test` (fake Nextcloud + Stirling, also runnable against
-  the inlined script with `UNLOCKER_SCRIPT=<file>`). Starts in dry run.
+  the inlined script with `UNLOCKER_SCRIPT=<file>`). Also renames ADCB card statements to include the card
+  number (`RENAME_MODE`). Unlock and rename each start in dry run.
