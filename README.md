@@ -11,3 +11,6 @@
   `bun scripts/inline-pdf-unlocker.ts`. Tests: `bun test` (fake Nextcloud + Stirling, also runnable against
   the inlined script with `UNLOCKER_SCRIPT=<file>`). Also renames ADCB card statements to include the card
   number (`RENAME_MODE`). Unlock and rename each start in dry run.
+
+Runtipi only offers an Update (and a new settings form) when `tipi_version` in `config.json` goes up, so bump it
+together with `version` on every change to an app.

@@ -7,7 +7,7 @@
   "exposable": false,
   "dynamic_config": true,
   "no_gui": true,
-  "tipi_version": 1,
+  "tipi_version": 2,
   "version": "1.1.0",
   "categories": [
     "utilities"
@@ -118,6 +118,6 @@
     }
   ],
   "created_at": 1795300000000,
-  "updated_at": 1795340000000,
+  "updated_at": 1795342000000,
   "min_tipi_version": "4.5.0"
 }
