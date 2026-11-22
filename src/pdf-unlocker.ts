@@ -4,10 +4,16 @@
 // password protected, removes the password with Stirling-PDF and writes the unlocked file back
 // under the same name. Nextcloud keeps the encrypted original as a file version.
 //
+// It also renames ADCB card statements saved without the card number (the browser names same-month
+// statements "... Card Statement (2).pdf") to "YYYY-MM - ADCB <last4> - Card Statement.pdf", taking the card
+// and statement date from page 1 via Stirling. RENAME_MODE: on / dry / off. Never overwrites an existing file.
+//
 // Safety: the write-back is conditional on the file's etag (If-Match), so a file edited while the
 // worker runs is never overwritten. A result is only written if it looks like a clean PDF.
 // Mode: "on" (replace), "dry" (decrypt to prove it works, change nothing) or "off".
 // NOTE: this file is inlined into docker-compose.yml, so it must not contain the dollar sign.
+
+import { inflateRawSync } from "node:zlib";
 
 type Mode = "on" | "dry" | "off";
 type Entry = { path: string; etag: string; size: number };
@@ -41,10 +47,12 @@ const FOLDERS = env("WATCH_FOLDERS", "Area/Finance/Banking").split(",").map(trim
 const PASSWORDS = env("PASSWORDS").split(/[\s,;]+/).filter(Boolean);
 const INTERVAL = Number(env("INTERVAL", "300"));
 const ONCE = ["1", "true", "yes"].includes(env("ONCE", "false").toLowerCase());
-const MODE: Mode = ((): Mode => {
-  const v = env("MODE", "dry").toLowerCase();
+const modeOf = (key: string): Mode => {
+  const v = env(key, "dry").toLowerCase();
   return v === "on" || v === "off" ? v : "dry";
-})();
+};
+const MODE: Mode = modeOf("MODE");
+const RENAME_MODE: Mode = modeOf("RENAME_MODE");
 
 const CHUNK = 8192;
 // An encryption dictionary is referenced as "/Encrypt 12 0 R" or inlined as "/Encrypt <<".
@@ -163,6 +171,76 @@ function looksClean(out: Uint8Array, original: number): string | null {
   return null;
 }
 
+// ADCB statements named without the card, e.g. "2026-10 - ADCB - Card Statement (3).pdf".
+const NO_CARD_NAME = /\d{4}-\d{2} - ADCB - Card Statement(?: \(\d+\))?\.pdf/;
+function needsCardName(name: string): boolean {
+  const m = NO_CARD_NAME.exec(name);
+  return m !== null && m.index === 0 && m[0].length === name.length;
+}
+
+// Stirling may answer with the .txt itself or with a zip holding it; read the first entry either way.
+function firstZipEntry(z: Uint8Array): Uint8Array {
+  const v = new DataView(z.buffer, z.byteOffset, z.byteLength);
+  let end = z.length - 22;
+  while (end >= 0 && v.getUint32(end, true) !== 0x06054b50) end--;
+  if (end < 0) throw new Error("not a zip file");
+  const cd = v.getUint32(end + 16, true);
+  if (v.getUint32(cd, true) !== 0x02014b50) throw new Error("bad zip directory");
+  const method = v.getUint16(cd + 10, true);
+  const size = v.getUint32(cd + 20, true);
+  const local = v.getUint32(cd + 42, true);
+  const start = local + 30 + v.getUint16(local + 26, true) + v.getUint16(local + 28, true);
+  const data = z.subarray(start, start + size);
+  return method === 0 ? data : new Uint8Array(inflateRawSync(data));
+}
+
+async function pdfText(name: string, bytes: Uint8Array): Promise<string> {
+  const form = new FormData();
+  form.append("fileInput", new Blob([bytes], { type: "application/pdf" }), name);
+  form.append("outputFormat", "txt");
+  const res = await fetch(STIRLING_URL + "/api/v1/convert/pdf/text", {
+    method: "POST",
+    headers: STIRLING_KEY ? { "X-API-KEY": STIRLING_KEY } : {},
+    body: form,
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (res.status === 401 || res.status === 403) throw new AuthError("Stirling rejected the API key (" + res.status + ")");
+  if (!res.ok) throw new Error("Stirling text conversion -> " + res.status);
+  let buf = new Uint8Array(await res.arrayBuffer());
+  if (buf[0] === 0x50 && buf[1] === 0x4b) buf = firstZipEntry(buf);
+  return new TextDecoder().decode(buf);
+}
+
+// Card = first masked number (XXXXXXXXXXXX2418). Statement date = the earliest dd/mm/yy date on page 1;
+// transactions use four-digit years, and the due date is always after the statement date.
+function cardStatementName(text: string): string | null {
+  const cut = text.search(/Page 2 of/);
+  const page1 = cut > 0 ? text.slice(0, cut) : text;
+  const card = /X{8,12}(\d{4})/.exec(page1);
+  const dates = [...page1.matchAll(/(?<![\d/])(\d{2})\/(\d{2})\/(\d{2})(?![\d/])/g)].map((m) => ({
+    key: Number(m[3]) * 10000 + Number(m[2]) * 100 + Number(m[1]),
+    y: 2000 + Number(m[3]),
+    m: m[2],
+  }));
+  if (!card || !dates.length) return null;
+  dates.sort((a, b) => a.key - b.key);
+  return dates[0].y + "-" + dates[0].m + " - ADCB " + card[1] + " - Card Statement.pdf";
+}
+
+async function renameStatement(e: Entry): Promise<void> {
+  const at = e.path.lastIndexOf("/") + 1;
+  const dir = e.path.slice(0, at);
+  const name = e.path.slice(at);
+  const next = cardStatementName(await pdfText(name, await download(e)));
+  if (!next) return log("rename: no card number or statement date found in", e.path);
+  if (next === name) return;
+  if (RENAME_MODE === "dry") return log("DRY RUN would rename", e.path, "->", next);
+  const res = await dav("MOVE", e.path, { Destination: davUrl(dir + next), Overwrite: "F" });
+  if (res.status === 412) return log("rename: " + next + " already exists, leaving", e.path);
+  if (!res.ok) throw new Error("MOVE " + e.path + " -> " + res.status);
+  log("renamed", e.path, "->", next);
+}
+
 type Outcome = "unlocked" | "dry" | "wrong-password" | "conflict" | "bad-output";
 
 async function unlock(e: Entry): Promise<Outcome> {
@@ -197,6 +275,11 @@ async function pass(handled: Map<string, string>): Promise<void> {
       if (handled.get(e.path) === e.etag) continue;
       try {
         if (!(await isEncrypted(e))) {
+          if (RENAME_MODE !== "off" && needsCardName(e.path.slice(e.path.lastIndexOf("/") + 1))) await renameStatement(e);
+          handled.set(e.path, e.etag);
+          continue;
+        }
+        if (MODE === "off") {
           handled.set(e.path, e.etag);
           continue;
         }
@@ -216,14 +299,14 @@ async function pass(handled: Map<string, string>): Promise<void> {
 
 async function main() {
   if (!PASSWORDS.length) throw new Error("PASSWORDS must list at least one password");
-  if (MODE === "off") {
-    log("mode is off, nothing to do");
+  if (MODE === "off" && RENAME_MODE === "off") {
+    log("unlock and rename are both off, nothing to do");
     if (ONCE) return;
   }
-  log("started: mode=" + MODE + ", folders=" + FOLDERS.join(" | ") + ", every " + INTERVAL + "s");
+  log("started: unlock=" + MODE + ", rename=" + RENAME_MODE + ", folders=" + FOLDERS.join(" | ") + ", every " + INTERVAL + "s");
   const handled = new Map<string, string>();
   while (true) {
-    if (MODE !== "off") {
+    if (MODE !== "off" || RENAME_MODE !== "off") {
       try {
         await pass(handled);
       } catch (err) {
