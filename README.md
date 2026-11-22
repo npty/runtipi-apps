@@ -6,3 +6,7 @@
 - `immich-trip-digest`: suggests `YYYY-MM Place` albums for unsorted trip photos (you approve each on its page)
   and posts a monthly library digest to Immich's notification bell. Source is `src/trip-digest.ts`; after
   editing it run `bun scripts/inline-trip-digest.ts`. Optional Dry run writes nothing to Immich.
+- `pdf-unlocker`: unlocks password-protected PDFs in watched Nextcloud folders (WebDAV + Stirling-PDF) and
+  replaces them in place under the same name. Source is `src/pdf-unlocker.ts`; after editing it run
+  `bun scripts/inline-pdf-unlocker.ts`. Tests: `bun test` (fake Nextcloud + Stirling, also runnable against
+  the inlined script with `UNLOCKER_SCRIPT=<file>`). Starts in dry run.

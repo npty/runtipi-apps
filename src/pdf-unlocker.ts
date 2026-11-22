@@ -1,0 +1,242 @@
+// PDF unlocker (Bun + TypeScript, no dependencies).
+//
+// Every INTERVAL seconds, walks the watched Nextcloud folders over WebDAV, finds PDFs that are
+// password protected, removes the password with Stirling-PDF and writes the unlocked file back
+// under the same name. Nextcloud keeps the encrypted original as a file version.
+//
+// Safety: the write-back is conditional on the file's etag (If-Match), so a file edited while the
+// worker runs is never overwritten. A result is only written if it looks like a clean PDF.
+// Mode: "on" (replace), "dry" (decrypt to prove it works, change nothing) or "off".
+// NOTE: this file is inlined into docker-compose.yml, so it must not contain the dollar sign.
+
+type Mode = "on" | "dry" | "off";
+type Entry = { path: string; etag: string; size: number };
+
+const env = (k: string, d?: string): string => {
+  const v = process.env[k];
+  if (v !== undefined && v !== "") return v;
+  if (d !== undefined) return d;
+  throw new Error("missing env " + k);
+};
+const trimSlashes = (s: string): string => {
+  let a = 0;
+  let b = s.length;
+  while (a < b && s[a] === "/") a++;
+  while (b > a && s[b - 1] === "/") b--;
+  return s.slice(a, b);
+};
+
+const noTrailingSlash = (s: string): string => {
+  let b = s.length;
+  while (b > 0 && s[b - 1] === "/") b--;
+  return s.slice(0, b);
+};
+
+const NC_URL = noTrailingSlash(env("NEXTCLOUD_URL"));
+const NC_USER = env("NEXTCLOUD_USER");
+const NC_AUTH = "Basic " + Buffer.from(NC_USER + ":" + env("NEXTCLOUD_APP_PASSWORD")).toString("base64");
+const STIRLING_URL = noTrailingSlash(env("STIRLING_URL"));
+const STIRLING_KEY = env("STIRLING_API_KEY", "");
+const FOLDERS = env("WATCH_FOLDERS", "Area/Finance/Banking").split(",").map(trimSlashes).filter(Boolean);
+const PASSWORDS = env("PASSWORDS").split(/[\s,;]+/).filter(Boolean);
+const INTERVAL = Number(env("INTERVAL", "300"));
+const ONCE = ["1", "true", "yes"].includes(env("ONCE", "false").toLowerCase());
+const MODE: Mode = ((): Mode => {
+  const v = env("MODE", "dry").toLowerCase();
+  return v === "on" || v === "off" ? v : "dry";
+})();
+
+const CHUNK = 8192;
+// An encryption dictionary is referenced as "/Encrypt 12 0 R" or inlined as "/Encrypt <<".
+const ENCRYPT = /\/Encrypt\s*(?:\d+\s+\d+\s+R|<<)/;
+const LATIN1 = new TextDecoder("latin1");
+
+const log = (...a: unknown[]) => console.log(new Date().toISOString(), ...a);
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+class AuthError extends Error {}
+
+const encodePath = (p: string): string => p.split("/").map(encodeURIComponent).join("/");
+const davUrl = (p: string): string =>
+  NC_URL + "/remote.php/dav/files/" + encodeURIComponent(NC_USER) + (p ? "/" + encodePath(p) : "");
+
+async function dav(method: string, path: string, headers: Record<string, string> = {}, body?: BodyInit) {
+  return fetch(davUrl(path), {
+    method,
+    headers: { Authorization: NC_AUTH, ...headers },
+    body,
+    signal: AbortSignal.timeout(120_000),
+  });
+}
+
+const decodeXml = (s: string): string =>
+  s.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
+
+function tag(block: string, name: string): string {
+  const m = new RegExp("<(?:\\w+:)?" + name + "(?:\\s[^>]*)?>([\\s\\S]*?)</(?:\\w+:)?" + name + ">").exec(block);
+  return m ? decodeXml(m[1]).trim() : "";
+}
+
+const PROPFIND_BODY =
+  '<?xml version="1.0"?><d:propfind xmlns:d="DAV:"><d:prop><d:getetag/><d:getcontentlength/><d:resourcetype/></d:prop></d:propfind>';
+
+// One level of a folder. Nextcloud refuses Depth: infinity, so callers recurse.
+async function listFolder(folder: string): Promise<{ files: Entry[]; dirs: string[] }> {
+  const res = await dav("PROPFIND", folder, { Depth: "1", "Content-Type": "application/xml" }, PROPFIND_BODY);
+  if (res.status === 401 || res.status === 403) throw new AuthError("Nextcloud rejected the credentials (" + res.status + ")");
+  if (res.status !== 207) throw new Error("PROPFIND " + folder + " -> " + res.status);
+  const xml = await res.text();
+  const marker = "/remote.php/dav/files/" + encodeURIComponent(NC_USER) + "/";
+  const files: Entry[] = [];
+  const dirs: string[] = [];
+  for (const m of xml.matchAll(/<(?:\w+:)?response>([\s\S]*?)<\/(?:\w+:)?response>/g)) {
+    const block = m[1];
+    const href = tag(block, "href");
+    const at = href.indexOf(marker);
+    if (at < 0) continue;
+    const rel = trimSlashes(decodeURIComponent(href.slice(at + marker.length)));
+    if (rel === folder) continue;
+    const name = rel.slice(rel.lastIndexOf("/") + 1);
+    if (name.startsWith(".")) continue;
+    if (/<(?:\w+:)?collection\s*\/>/.test(block)) dirs.push(rel);
+    else if (name.toLowerCase().endsWith(".pdf"))
+      files.push({ path: rel, etag: tag(block, "getetag"), size: Number(tag(block, "getcontentlength")) });
+  }
+  return { files, dirs };
+}
+
+async function walk(root: string): Promise<Entry[]> {
+  const out: Entry[] = [];
+  const stack = [root];
+  while (stack.length) {
+    const { files, dirs } = await listFolder(stack.pop() as string);
+    out.push(...files);
+    stack.push(...dirs);
+  }
+  return out;
+}
+
+async function rangeBytes(path: string, range: string): Promise<Uint8Array> {
+  const res = await dav("GET", path, { Range: range });
+  if (!res.ok) throw new Error("GET " + path + " " + range + " -> " + res.status);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+// Header and trailer both: linearized PDFs keep their trailer at the start, others at the end.
+async function isEncrypted(e: Entry): Promise<boolean> {
+  const head = await rangeBytes(e.path, "bytes=0-" + (CHUNK - 1));
+  if (ENCRYPT.test(LATIN1.decode(head))) return true;
+  if (e.size <= CHUNK) return false;
+  const tail = await rangeBytes(e.path, "bytes=-" + CHUNK);
+  return ENCRYPT.test(LATIN1.decode(tail));
+}
+
+async function download(e: Entry): Promise<Uint8Array> {
+  const res = await dav("GET", e.path);
+  if (!res.ok) throw new Error("GET " + e.path + " -> " + res.status);
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+async function removePassword(name: string, bytes: Uint8Array, password: string): Promise<Uint8Array | null> {
+  const form = new FormData();
+  form.append("fileInput", new Blob([bytes], { type: "application/pdf" }), name);
+  form.append("password", password);
+  const res = await fetch(STIRLING_URL + "/api/v1/security/remove-password", {
+    method: "POST",
+    headers: STIRLING_KEY ? { "X-API-KEY": STIRLING_KEY } : {},
+    body: form,
+    signal: AbortSignal.timeout(300_000),
+  });
+  if (res.status === 401 || res.status === 403) throw new AuthError("Stirling rejected the API key (" + res.status + ")");
+  if (!res.ok) return null; // wrong password, or a file Stirling cannot open
+  return new Uint8Array(await res.arrayBuffer());
+}
+
+// Never write back anything that does not look like a complete, unencrypted PDF.
+function looksClean(out: Uint8Array, original: number): string | null {
+  const head = LATIN1.decode(out.subarray(0, CHUNK));
+  const tail = LATIN1.decode(out.subarray(Math.max(0, out.length - CHUNK)));
+  if (!head.startsWith("%PDF-")) return "no PDF header";
+  if (!tail.includes("%%EOF")) return "no end-of-file marker";
+  if (ENCRYPT.test(head) || ENCRYPT.test(tail)) return "still encrypted";
+  if (out.length < original * 0.5) return "output is less than half the original size";
+  return null;
+}
+
+type Outcome = "unlocked" | "dry" | "wrong-password" | "conflict" | "bad-output";
+
+async function unlock(e: Entry): Promise<Outcome> {
+  const name = e.path.slice(e.path.lastIndexOf("/") + 1);
+  const original = await download(e);
+  let out: Uint8Array | null = null;
+  for (const pw of PASSWORDS) {
+    out = await removePassword(name, original, pw);
+    if (out) break;
+  }
+  if (!out) return "wrong-password";
+  const problem = looksClean(out, original.length);
+  if (problem) {
+    log("refusing to write", e.path + ":", problem);
+    return "bad-output";
+  }
+  if (MODE === "dry") {
+    log("DRY RUN would unlock", e.path, "(" + original.length + " -> " + out.length + " bytes)");
+    return "dry";
+  }
+  const res = await dav("PUT", e.path, { "If-Match": e.etag, "Content-Type": "application/pdf" }, out);
+  if (res.status === 412) return "conflict";
+  if (!res.ok) throw new Error("PUT " + e.path + " -> " + res.status);
+  log("unlocked", e.path, "(" + original.length + " -> " + out.length + " bytes)");
+  return "unlocked";
+}
+
+// path -> etag already handled, so unchanged files cost nothing on later passes.
+async function pass(handled: Map<string, string>): Promise<void> {
+  for (const folder of FOLDERS) {
+    for (const e of await walk(folder)) {
+      if (handled.get(e.path) === e.etag) continue;
+      try {
+        if (!(await isEncrypted(e))) {
+          handled.set(e.path, e.etag);
+          continue;
+        }
+        const outcome = await unlock(e);
+        if (outcome === "wrong-password")
+          log("no configured password opened", e.path, "(or Stirling could not read it) - skipping until it changes");
+        if (outcome === "conflict") log("changed while unlocking, will retry next pass:", e.path);
+        if (outcome === "unlocked") handled.delete(e.path); // new etag: re-check it next pass
+        else if (outcome !== "conflict") handled.set(e.path, e.etag);
+      } catch (err) {
+        if (err instanceof AuthError) throw err;
+        log("skip", e.path, String(err));
+      }
+    }
+  }
+}
+
+async function main() {
+  if (!PASSWORDS.length) throw new Error("PASSWORDS must list at least one password");
+  if (MODE === "off") {
+    log("mode is off, nothing to do");
+    if (ONCE) return;
+  }
+  log("started: mode=" + MODE + ", folders=" + FOLDERS.join(" | ") + ", every " + INTERVAL + "s");
+  const handled = new Map<string, string>();
+  while (true) {
+    if (MODE !== "off") {
+      try {
+        await pass(handled);
+      } catch (err) {
+        if (err instanceof AuthError) throw err; // bad credentials will not fix themselves
+        log("error:", String(err)); // keep running through Nextcloud/Stirling restarts
+      }
+    }
+    if (ONCE) return;
+    await sleep(INTERVAL * 1000);
+  }
+}
+
+main().catch((err) => {
+  log("fatal:", String(err));
+  process.exit(1);
+});
