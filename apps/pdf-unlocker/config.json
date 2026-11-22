@@ -1,0 +1,102 @@
+{
+  "$schema": "../app-info-schema.json",
+  "name": "PDF Unlocker",
+  "id": "pdf-unlocker",
+  "available": true,
+  "port": 8938,
+  "exposable": false,
+  "dynamic_config": true,
+  "no_gui": true,
+  "tipi_version": 1,
+  "version": "1.0.0",
+  "categories": [
+    "utilities"
+  ],
+  "short_desc": "Removes passwords from encrypted PDFs in Nextcloud folders and replaces them in place.",
+  "description": "Scans watched Nextcloud folders over WebDAV, unlocks password-protected PDFs with Stirling-PDF and writes them back under the same name. Conditional write-back (If-Match), output sanity checks, dry run first.",
+  "author": "npty",
+  "source": "https://github.com/npty",
+  "supported_architectures": [
+    "arm64",
+    "amd64"
+  ],
+  "form_fields": [
+    {
+      "type": "url",
+      "label": "Nextcloud URL (must be a trusted domain)",
+      "required": true,
+      "default": "https://nextcloud2.npty.online",
+      "env_variable": "UNLOCKER_NEXTCLOUD_URL"
+    },
+    {
+      "type": "text",
+      "label": "Nextcloud user",
+      "required": true,
+      "default": "ripzery",
+      "env_variable": "UNLOCKER_NEXTCLOUD_USER"
+    },
+    {
+      "type": "password",
+      "label": "Nextcloud app password (Settings > Security > Devices & sessions)",
+      "required": true,
+      "env_variable": "UNLOCKER_NEXTCLOUD_APP_PASSWORD"
+    },
+    {
+      "type": "url",
+      "label": "Stirling-PDF URL",
+      "required": true,
+      "default": "http://stirling-pdf_migrated-stirling-pdf-1:8080",
+      "env_variable": "UNLOCKER_STIRLING_URL"
+    },
+    {
+      "type": "password",
+      "label": "Stirling-PDF API key",
+      "required": true,
+      "env_variable": "UNLOCKER_STIRLING_API_KEY"
+    },
+    {
+      "type": "text",
+      "label": "Watched folders (comma separated, relative to the user's files)",
+      "required": false,
+      "default": "Area/Finance/Banking",
+      "env_variable": "UNLOCKER_WATCH_FOLDERS"
+    },
+    {
+      "type": "password",
+      "label": "PDF passwords (separated by spaces, commas or semicolons)",
+      "required": true,
+      "env_variable": "UNLOCKER_PASSWORDS"
+    },
+    {
+      "type": "text",
+      "label": "Mode",
+      "required": false,
+      "default": "dry",
+      "options": [
+        {
+          "label": "Off",
+          "value": "off"
+        },
+        {
+          "label": "Dry run (decrypt to check, change nothing)",
+          "value": "dry"
+        },
+        {
+          "label": "On (replace encrypted PDFs in place)",
+          "value": "on"
+        }
+      ],
+      "env_variable": "UNLOCKER_MODE"
+    },
+    {
+      "type": "number",
+      "label": "Check every (seconds)",
+      "required": false,
+      "default": 300,
+      "env_variable": "UNLOCKER_INTERVAL"
+    }
+  ],
+  "created_at": 1795300000000,
+  "updated_at": 1795300000000,
+  "min_tipi_version": "4.5.0"
+}
